@@ -2,8 +2,9 @@
  * FPS47 for the SwissMicros DM42n (DMCP5 native program, .pg5): how fast can the LCD show moving pictures?
  * (C) 2026 Victor Valdes (valdes.vj@gmail.com) - GPL-3.0-or-later
  *
- * The question before a Game Boy (or C64) emulator: how many whole frames a second the DM42n's 400x240 LCD can
- * take, and how long the drawing itself takes. Seven tests, about 3 seconds each:
+ * The question before a Game Boy or ZX Spectrum emulator (GB47, ZX47): how many whole frames a second the DM42n's
+ * 400x240 LCD can take, how long the drawing itself takes, and how much heap a program gets. Nine tests, about 3
+ * seconds each, and the heap measured at start:
  *
  *   1 FULL forced    all 240 lines change (inverted in the buffer), lcd_forced_refresh
  *   2 FULL fill      the whole screen black / white with lcd_fill_rect, lcd_refresh (DMCP's own way)
@@ -13,10 +14,14 @@
  *   5 GB rects       the same frame drawn with lcd_fill_rect runs (as NAV47 and TERM47 draw), lcd_refresh
  *   6 GB draw only   the drawing alone, no refresh: the CPU's part
  *   7 lines only     lcd_refresh_lines of 216 unchanged lines: the LCD's part
+ *   8 ZX full        a ZX Spectrum frame (256x192, 1 bit, 1:1) written straight in, all its 192 lines sent
+ *   9 ZX part        the same frame, only the band of lines that changed sent (a sprite moving in a still room,
+ *                    as Knight Lore or Head over Heels draw)     <- the Spectrum emulator's way
+ *   heap             the largest block malloc gives, and the total in 64 KB .. 256 B blocks (all freed again)
  *
  * Each frame waits for the LCD (lcd_refresh_wait), so the numbers are what the eye gets. The results show on the
- * screen and go to /FPS47/RESULT.TXT (copy it over USB). Run once on battery (80 MHz) and once on USB power
- * (160 MHz). F1 (WATCH) runs test 3 without end, with the frame rate on the left: look for smearing.
+ * screen and go to /FPS47/RESULT_BAT.TXT or RESULT_USB.TXT. Run once on battery (80 MHz) and once on USB power
+ * (160 MHz). F1 (WATCH GB) runs test 3 and F2 (WATCH ZX) test 9 without end, the frame rate on the left.
  *
  * The line buffer's layout (byte and bit order, which value is ink) is learnt at start by setting single
  * pixels, as Chess 47's and NAV47's screen mirror do, so no undocumented detail is assumed.
@@ -33,6 +38,11 @@
 #define OY  12
 #define OW  240
 #define OH  216
+#define ZW  256                             /* the ZX Spectrum picture: 256x192 1:1 at (72, 24) */
+#define ZH  192
+#define ZB  (ZW / 8)
+#define ZX0 72
+#define ZY0 24
 
 /* ------------------------------------------------------------------ */
 /*  The line buffer's layout                                          */
@@ -139,6 +149,95 @@ static void invert_all(void) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  A ZX Spectrum frame: 256x192, 1 bit; a still room, a moving sprite */
+/* ------------------------------------------------------------------ */
+static uint8_t (*zx)[ZB], (*zxold)[ZB];     /* this frame and the one on the screen, on the heap (2 x 6 KB) */
+static int zx_lines;                        /* lines sent by the last ZX frame */
+static uint32_t zx_sent;                    /* lines sent in a test, added up */
+
+static inline void zset(int x, int y) {
+  if (x >= 0 && x < ZW && y >= 0 && y < ZH) zx[y][x >> 3] |= (uint8_t)(0x80 >> (x & 7));
+}
+
+static void zline(int x0, int y0, int x1, int y1) {
+  int dx = abs(x1 - x0), dy = -abs(y1 - y0), sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1, e = dx + dy;
+  for (;;) {
+    zset(x0, y0);
+    if (x0 == x1 && y0 == y1) return;
+    int e2 = 2 * e;
+    if (e2 >= dy) { e += dy; x0 += sx; }
+    if (e2 <= dx) { e += dx; y0 += sy; }
+  }
+}
+
+static void make_zx(int t) {
+  memset(zx, 0, ZH * ZB);
+  zline(128, 30, 8, 90); zline(8, 90, 128, 150); zline(128, 150, 248, 90); zline(248, 90, 128, 30);   /* the floor */
+  for (int i = 1; i < 6; i++) {                                                                       /* its tiles */
+    zline(128 - i * 20, 30 + i * 10, 248 - i * 20, 90 + i * 10);
+    zline(128 + i * 20, 30 + i * 10, 8 + i * 20, 90 + i * 10);
+  }
+  zline(8, 90, 8, 10); zline(128, 30, 128, 0); zline(8, 10, 128, 0);                                   /* a wall */
+  for (int y = 20; y < 70; y += 12) zline(20, y + 20, 116, y);                                         /* its bricks */
+  int px = 60 + (t * 2) % 120, py = 70 + (t / 2) % 30;                                               /* the sprite */
+  for (int y = 0; y < 28; y++)
+    for (int x = 0; x < 20; x++) {
+      int edge = x == 0 || x == 19 || y == 0 || y == 27;
+      int face = (x > 4 && x < 15 && y > 4 && y < 12) && ((x + y + t) & 1);
+      if (edge || face || (y > 16 && ((x ^ y) & 3) == 0)) zset(px + x, py + y);
+    }
+}
+
+/* rows lo..hi-1 of the ZX frame into the line buffer */
+static void draw_zx_rows(int lo, int hi) {
+  for (int y = lo; y < hi; y++) {
+    uint8_t *p = lcd_line_addr(ZY0 + y);
+    for (int x = 0; x < ZW; x++) {
+      int X = ZX0 + x, on = zx[y][x >> 3] >> (7 - (x & 7)) & 1;
+      if (on == ink) p[xbyte[X]] |= xbit[X]; else p[xbyte[X]] &= (uint8_t)~xbit[X];
+    }
+  }
+}
+
+/* the whole frame written and sent (part = 0), or only the band of lines that changed (part = 1) */
+static void zx_frame(int part, int n, uint32_t *drawn) {
+  uint32_t a = sys_current_ms();
+  make_zx(n);
+  int lo = 0, hi = ZH;
+  if (part) {
+    while (lo < ZH && !memcmp(zx[lo], zxold[lo], ZB)) lo++;
+    while (hi > lo && !memcmp(zx[hi - 1], zxold[hi - 1], ZB)) hi--;
+  }
+  draw_zx_rows(lo, hi);
+  memcpy(zxold[lo], zx[lo], (size_t)(hi - lo) * ZB);
+  *drawn = sys_current_ms() - a;
+  zx_lines = hi - lo;
+  if (zx_lines) { lcd_refresh_lines(ZY0 + lo, zx_lines); lcd_refresh_wait(); }
+}
+
+/* ------------------------------------------------------------------ */
+/*  The heap a program gets                                           */
+/* ------------------------------------------------------------------ */
+static uint32_t heap_total, heap_largest;
+
+static void measure_heap(void) {
+  uint32_t lo = 0, hi = 1u << 20;                    /* the largest block: halving, up to 1 MB */
+  while (hi - lo > 256) {
+    uint32_t mid = (lo + hi) / 2;
+    void *p = malloc(mid);
+    if (p) { free(p); lo = mid; } else hi = mid;
+  }
+  heap_largest = lo;
+  void *head = NULL;                                 /* the total: blocks chained through their first word */
+  heap_total = 0;
+  for (uint32_t sz = 65536; sz >= 256; sz /= 4)
+    for (void *p; heap_total < (2u << 20) && (p = malloc(sz)) != NULL;) {
+      *(void **)p = head; head = p; heap_total += sz;
+    }
+  while (head) { void *nx = *(void **)head; free(head); head = nx; }
+}
+
+/* ------------------------------------------------------------------ */
 /*  Text                                                              */
 /* ------------------------------------------------------------------ */
 static void text(int x, int y, const char *s, int inv) {
@@ -160,10 +259,12 @@ static void show(void) { lcd_refresh(); lcd_refresh_wait(); }
 /*  The tests                                                         */
 /* ------------------------------------------------------------------ */
 typedef struct { const char *name; int frames; uint32_t ms, draw_ms, lcd_ms; } Result;
-enum { T_FULL_FORCED, T_FULL_FILL, T_GB_LINES, T_GB_FORCED, T_GB_RECTS, T_GB_DRAW, T_LINES, T_CNT };
+enum { T_FULL_FORCED, T_FULL_FILL, T_GB_LINES, T_GB_FORCED, T_GB_RECTS, T_GB_DRAW, T_LINES, T_ZX_FULL, T_ZX_PART,
+       T_CNT };
 static const char *TNAME[T_CNT] = { "FULL forced", "FULL fill", "GB lines", "GB forced", "GB rects",
-                                    "GB draw only", "lines only" };
+                                    "GB draw only", "lines only", "ZX full", "ZX part" };
 static Result res[T_CNT];
+static uint32_t part_lines;                 /* ZX part: lines sent a frame, on average */
 #define RUN_MS 3000
 
 static int aborted(void) {
@@ -173,6 +274,15 @@ static int aborted(void) {
 
 /* one frame of a test: the drawing, then the LCD; the times added to r */
 static void frame(int t, int n, Result *r) {
+  if (t == T_ZX_FULL || t == T_ZX_PART) {             /* draws and sends in one: the band depends on the frame */
+    uint32_t a = sys_current_ms(), d;
+    zx_frame(t == T_ZX_PART, n, &d);
+    r->draw_ms += d;
+    r->lcd_ms += sys_current_ms() - a - d;
+    r->frames++;
+    zx_sent += (uint32_t)zx_lines;
+    return;
+  }
   uint32_t a = sys_current_ms();
   switch (t) {
   case T_FULL_FORCED: invert_all(); break;
@@ -203,6 +313,7 @@ static int run_test(int t) {
   sprintf(s, "Test %d/%d: %s   (EXIT stops)", t + 1, T_CNT, TNAME[t]);
   bar(s);
   if (t == T_LINES) { make_gb(0); draw_gb_direct(); }
+  if (t == T_ZX_FULL || t == T_ZX_PART) { memset(zxold, 0, ZH * ZB); zx_sent = 0; }
   lcd_forced_refresh(); lcd_refresh_wait();
   uint32_t start = sys_current_ms();
   int n = 0;
@@ -212,6 +323,7 @@ static int run_test(int t) {
     if (r->frames >= 2000) break;
   }
   r->ms = sys_current_ms() - start;
+  if (t == T_ZX_PART) part_lines = r->frames ? zx_sent / (uint32_t)r->frames : 0;
   reset_auto_off();
   return 1;
 }
@@ -227,13 +339,18 @@ static void ms_per(char *s, uint32_t total, int frames) {   /* ms a frame with o
   sprintf(s, "%3lu.%lu", (unsigned long)(m10 / 10), (unsigned long)(m10 % 10));
 }
 
+static int saved;
+
 static void save_results(void) {
+  saved = 0;
   if (!sys_disk_ok()) return;
-  char buf[1024], a[16], b[16], c[16];
+  char buf[1280], a[16], b[16], c[16];
   int n = sprintf(buf, "FPS47 %s  DM42n LCD frame rate\r\nUSB power: %s   power voltage: %lu\r\n"
-                       "layout learnt: %s (ink=%d)\r\n\r\n%-13s %7s %7s %8s %8s\r\n",
+                       "layout learnt: %s (ink=%d)\r\nheap: largest block %lu bytes, total %lu bytes\r\n"
+                       "ZX part: %lu lines sent a frame (of 192)\r\n\r\n%-13s %7s %7s %8s %8s\r\n",
                   PROGRAM_VERSION, usb_powered() ? "yes (160 MHz)" : "no (battery, 80 MHz)",
                   (unsigned long)read_power_voltage(), learnt ? "yes" : "NO", ink,
+                  (unsigned long)heap_largest, (unsigned long)heap_total, (unsigned long)part_lines,
                   "test", "fps", "frames", "draw ms", "lcd ms");
   for (int t = 0; t < T_CNT; t++) {
     fmt_fps(a, &res[t]); ms_per(b, res[t].draw_ms, res[t].frames); ms_per(c, res[t].lcd_ms, res[t].frames);
@@ -243,61 +360,65 @@ static void save_results(void) {
   check_create_dir("/FPS47");
   const char *name = usb_powered() ? "/FPS47/RESULT_USB.TXT" : "/FPS47/RESULT_BAT.TXT";
   FIL f;
-  UINT bw;
+  UINT bw = 0;
   if (f_open(&f, name, FA_WRITE | FA_CREATE_ALWAYS) == FR_OK) { f_write(&f, buf, (UINT)n, &bw); f_close(&f); }
   sys_disk_write_enable(0);
+  saved = bw == (UINT)n;
 }
 
 static void show_results(int done) {
   char s[64], a[16], b[16], c[16];
   lcd_clear_buf();
-  sprintf(s, "FPS47 %s   %s", PROGRAM_VERSION, usb_powered() ? "USB power, 160 MHz" : "battery, 80 MHz");
+  sprintf(s, "%s  heap %luK  %s", usb_powered() ? "USB 160MHz" : "BAT 80MHz", (unsigned long)(heap_total >> 10),
+          !done ? "stopped" : saved ? (usb_powered() ? "RESULT_USB" : "RESULT_BAT") : "NOT saved");
   bar(s);
-  int y = 24;
+  int y = 23;
   text(4, y, "test", 0); text(150, y, "fps", 0); text(220, y, "draw", 0); text(310, y, "lcd ms", 0);
-  y += 22;
+  y += 19;
   for (int t = 0; t < T_CNT; t++) {
     if (!res[t].frames) continue;
     fmt_fps(a, &res[t]); ms_per(b, res[t].draw_ms, res[t].frames); ms_per(c, res[t].lcd_ms, res[t].frames);
     text(4, y, TNAME[t], 0); text(140, y, a, 0); text(215, y, b, 0); text(310, y, c, 0);
-    y += 20;
+    y += 18;
   }
-  if (!done) text(4, y + 2, "Stopped (EXIT)", 0);
-  else text(4, y + 2, usb_powered() ? "Saved: /FPS47/RESULT_USB.TXT" : "Saved: /FPS47/RESULT_BAT.TXT", 0);
-  static const char *K[6] = { "WATCH", "", "", "", "RUN", "OFF" };
+  static const char *K[6] = { "GB", "ZX", "", "", "RUN", "OFF" };
   lcd_draw_menu_keys(K);
   show();
 }
 
 static void intro(void) {
   lcd_clear_buf();
-  bar("FPS47: how fast is the DM42n's LCD?");
+  bar("FPS47 " PROGRAM_VERSION ": how fast is the DM42n's LCD?");
+  char h[48];
+  sprintf(h, "Heap: %luK free, largest %luK", (unsigned long)(heap_total >> 10), (unsigned long)(heap_largest >> 10));
   static const char *L[] = {
-    "Seven tests, about 3 s each (21 s).",
+    "Nine tests, about 3 s each (27 s).",
     "Run on battery, then on USB power.",
-    "",
     "RUN (F5) or ENTER: start the tests",
-    "WATCH (F1): the Game Boy picture",
+    "GB (F1) / ZX (F2): watch a picture",
     "   moving, frame rate on the left",
     "EXIT: stop a test     OFF (F6): off",
   };
-  for (unsigned i = 0; i < sizeof L / sizeof *L; i++) text(4, 26 + (int)i * 22, L[i], 0);
+  text(4, 26, h, 0);
+  for (unsigned i = 0; i < sizeof L / sizeof *L; i++) text(4, 50 + (int)i * 22, L[i], 0);
   if (!learnt) text(4, 186, "LCD layout NOT learnt: direct tests off", 0);
-  static const char *K[6] = { "WATCH", "", "", "", "RUN", "OFF" };
+  static const char *K[6] = { "GB", "ZX", "", "", "RUN", "OFF" };
   lcd_draw_menu_keys(K);
   show();
 }
 
-/* the Game Boy picture without end, as an emulator would draw it */
-static void watch(void) {
+/* a picture without end, as an emulator would draw it: the Game Boy (T_GB_LINES) or the Spectrum (T_ZX_PART) */
+static void watch(int t) {
   Result r;
   memset(&r, 0, sizeof r);
+  int left = t == T_ZX_PART ? ZX0 : OX;
   lcd_clear_buf();
+  if (t == T_ZX_PART) memset(zxold, 0, ZH * ZB);
   lcd_forced_refresh(); lcd_refresh_wait();
   uint32_t t0 = sys_current_ms(), last = t0;
   int n = 0, shown = 0;
   for (;;) {
-    frame(T_GB_LINES, n++, &r);
+    frame(t, n++, &r);
     uint32_t now = sys_current_ms();
     if (now - last >= 1000) {                                 /* the frame rate, once a second */
       char s[16], a[16];
@@ -306,7 +427,7 @@ static void watch(void) {
       w.ms = now - last;
       fmt_fps(a, &w);
       sprintf(s, "%s", a);
-      lcd_fill_rect(0, 30, OX - 4, 70, 0);                  /* the left margin, beside the picture */
+      lcd_fill_rect(0, 30, (uint32_t)(left - 4), 70, 0);    /* the left margin, beside the picture */
       text(4, 30, "fps", 0);
       text(4, 52, s, 0);
       text(4, 74, "EXIT", 0);
@@ -324,8 +445,11 @@ void _exit(int code) { (void)code; sys_reset(); for (;;) {} }
 
 void program_main(void) {
   switch_usb_powered_freq();
+  measure_heap();                                     /* first: what a program gets, before our own buffers */
   gb = malloc(GBH * GBW);
-  if (!gb) {
+  zx = malloc(ZH * ZB);
+  zxold = malloc(ZH * ZB);
+  if (!gb || !zx || !zxold) {
     lcd_clear_buf();
     text(4, 40, "FPS47: not enough memory", 0);
     show();
@@ -368,7 +492,11 @@ void program_main(void) {
     int key = key_pop();
     if (key <= 0 || key == KEY_DOUBLE_RELEASE) continue;
     if (key == KEY_F6 || key == KEY_EXIT) { SET_ST(STAT_PGM_END); continue; }
-    if (key == KEY_F1 && learnt) { watch(); if (have) show_results(1); else intro(); continue; }
+    if ((key == KEY_F1 || key == KEY_F2) && learnt) {
+      watch(key == KEY_F1 ? T_GB_LINES : T_ZX_PART);
+      if (have) show_results(1); else intro();
+      continue;
+    }
     if (key == KEY_F5 || key == KEY_ENTER) {
       switch_usb_powered_freq();
       int done = 1;
