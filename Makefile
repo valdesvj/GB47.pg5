@@ -40,11 +40,11 @@ fps-sim:
 	gcc -O2 -w '-D__packed=__attribute__((__packed__))' '-D__weak=__attribute__((weak))' -DGB47_SIM \
 	    -Itest/sim -Itools/fps47 -Isrc -o $(FPS_DIR)/sim test/sim/sim.c test/sim/sercon_sim.c tools/fps47/fps47.c
 
-# the simulator's screens: the intro, the results, WATCH
+# the simulator's screens: the intro, the results, WATCH GB, WATCH ZX
 fps-shots: fps-sim
 	rm -rf $(FPS_DIR)/run && mkdir -p $(FPS_DIR)/run
-	cd $(FPS_DIR)/run && ../sim SNAP:intro ENTER WAIT:200 SNAP:test1 WAIT:23000 SNAP:results F1 WAIT:2500 SNAP:watch EXIT
-	for n in intro test1 results watch; do $(PYTHON) test/sim/render.py $(FPS_DIR)/run/$$n $(FPS_DIR)/run/$$n.png; done
+	cd $(FPS_DIR)/run && ../sim SNAP:intro ENTER WAIT:200 SNAP:test1 WAIT:29000 SNAP:results F1 WAIT:2500 SNAP:watch EXIT F2 WAIT:2500 SNAP:watchzx EXIT
+	for n in intro test1 results watch watchzx; do $(PYTHON) test/sim/render.py $(FPS_DIR)/run/$$n $(FPS_DIR)/run/$$n.png; done
 
 clean:
 	-rm -fR $(BUILD_DIR)
