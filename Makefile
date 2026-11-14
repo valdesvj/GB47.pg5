@@ -13,7 +13,10 @@ AS      = arm-none-eabi-gcc -x assembler-with-cpp
 OBJCOPY = arm-none-eabi-objcopy
 SIZE    = arm-none-eabi-size
 
-C_DEFS   = -D__weak="__attribute__((weak))" -D__packed="__attribute__((__packed__))" -DPLATFORM_IFC_VER=18
+# the DMCP5 interface the .pg5 asks for: 17 loads on DMCP5 3.57 and later (FPS47 needs nothing newer);
+# 18 (DMCP5 3.58) only for the serial console, later in the emulators: make IFC=18
+IFC ?= 17
+C_DEFS   = -D__weak="__attribute__((weak))" -D__packed="__attribute__((__packed__))" -DPLATFORM_IFC_VER=$(IFC)
 CPUFLAGS = -mthumb -march=armv7e-m -mfloat-abi=hard -mfpu=fpv4-sp-d16
 LDSCRIPT = stm32_program.ld
 

@@ -45,7 +45,8 @@ left: look whether the moving ball or sprite smears or flickers.
 
 **EXIT** stops a test. **OFF** (F6) turns the calculator off; load your usual program from the DMCP menu.
 
-FPS47 needs DMCP5 3.58 (IFC 18), like TERM47.
+FPS47 loads on DMCP5 3.57 or later (interface 3.17): no firmware update needed. (Version 0.2 as first published
+asked for 3.58 and showed "> 3.18" on older firmware: take this one.)
 
 ### What the numbers decide
 
